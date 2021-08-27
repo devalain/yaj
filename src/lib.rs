@@ -118,16 +118,30 @@ pub fn lex(source: &str) -> Vec<JsonToken> {
                 }
                 // Try to find a number
                 '-' | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
-                    let (next_idx, followed_by_comma) = lex_number(idx, chr, &mut indices);
+                    let (next_idx, next_char) = lex_number(idx, chr, &mut indices);
                     tokens.push(JsonToken {
                         slice: &source[idx..next_idx],
                         token_type: JsonTokenType::Number,
                     });
-                    if followed_by_comma {
-                        tokens.push(JsonToken {
+                    match next_char {
+                        Some(',') => tokens.push(JsonToken {
                             slice: &source[next_idx..(next_idx + 1)],
                             token_type: JsonTokenType::Comma,
-                        });
+                        }),
+                        Some('}') => tokens.push(JsonToken {
+                            slice: &source[next_idx..(next_idx + 1)],
+                            token_type: JsonTokenType::RightBrace,
+                        }),
+                        Some(']') => tokens.push(JsonToken {
+                            slice: &source[next_idx..(next_idx + 1)],
+                            token_type: JsonTokenType::RightBracket,
+                        }),
+                        Some(other) => {
+                            if !other.is_whitespace() {
+                                panic!("Number followed by '{}'", other);
+                            }
+                        },
+                        None => {}
                     }
                 }
                 // Try to find `true`
@@ -191,7 +205,7 @@ enum NumberLexerState {
     ExponentSign,
     ExponentDigits,
 }
-fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, bool) {
+fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, Option<char>) {
     use NumberLexerState::*;
     let mut state = match chr {
         '-' => Sign,
@@ -202,7 +216,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, boo
         let (idx, chr) = match indices.next() {
             Some(tuple) => tuple,
             None if state == Sign => panic!("Unexpected end of file while lexing a number"),
-            None => break (start, false),
+            None => break (start, None),
         };
         match state {
             Sign => match chr {
@@ -214,7 +228,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, boo
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {}
                 '.' => state = FractionDot,
                 'e' | 'E' => state = Exponent,
-                other => break (idx, other == ','),
+                other => break (idx, Some(other)),
             },
             FirstZero => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '-' => {
@@ -222,7 +236,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, boo
                 }
                 '.' => state = FractionDot,
                 'e' | 'E' => state = Exponent,
-                other => break (idx, other == ','),
+                other => break (idx, Some(other)),
             },
             FractionDot => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
@@ -236,7 +250,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, boo
             FractionDigits => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {}
                 'e' | 'E' => state = Exponent,
-                other => break (idx, other == ','),
+                other => break (idx, Some(other)),
             },
             Exponent => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => state = ExponentDigits,
@@ -255,57 +269,76 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, boo
             },
             ExponentDigits => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {}
-                other => break (idx, other == ','),
+                other => break (idx, Some(other)),
             },
         }
     }
 }
 
-pub fn parse(json: &str) -> JsonValue {
-    parse_value(&lex(json))
+pub struct ParseError<'a, 'b> {
+    pub token: &'a JsonToken<'b>,
+    pub view: &'a [JsonToken<'b>],
+    pub msg: String
+}
+impl<'a, 'b> ParseError<'a, 'b> {
+    fn new<M: AsRef<str>, T>(msg: M, token: &'a JsonToken<'b>, view: &'a [JsonToken<'b>]) -> Result<T, Self> {
+        Err(Self { msg: msg.as_ref().to_string(), token, view })
+    }
+}
+impl <'a,'b> std::fmt::Debug for ParseError<'a, 'b> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let end = 5.min(self.view.len());
+        f.debug_struct("ParseError")
+            .field("msg", &self.msg)
+            .field("token", &self.token)
+            .field("view", &&self.view[..end])
+            .finish()
+    }
 }
 
-fn parse_value<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
-    match tokens.first() {
+pub fn parse(json: &str) -> JsonValue {
+    let tokens = lex(json);
+    match parse_value(&tokens) {
+        Ok(v) => v,
+        Err(e) => panic!("{:#?}", e)
+    }
+}
+
+fn parse_value<'a, 'b>(tokens: &'a [JsonToken<'b>]) -> Result<JsonValue<'b>, ParseError<'a, 'b>> {
+    Ok(match tokens.first() {
         Some(tok) => match (&tok.token_type, tokens.len()) {
             (JsonTokenType::LeftBracket, len) => {
                 if len < 2 {
-                    panic!("Incomplete array");
+                    ParseError::new("Incomplete array", tok, tokens)?;
                 }
                 let last_idx = len - 1;
                 if tokens[last_idx].token_type != JsonTokenType::RightBracket {
-                    panic!(
-                        "Invalid token at the end of document: '{}'",
-                        tokens[last_idx].slice
-                    );
+                    ParseError::new("Invalid token at the end of document", &tokens[last_idx], &tokens[(last_idx - 3)..])?;
                 }
-                parse_array(&tokens[1..last_idx])
+                parse_array(&tokens[1..last_idx])?
             }
             (JsonTokenType::LeftBrace, len) => {
                 if len < 2 {
-                    panic!("Incomplete object");
+                    ParseError::new("Incomplete object", tok, tokens)?;
                 }
                 let last_idx = len - 1;
                 if tokens[last_idx].token_type != JsonTokenType::RightBrace {
-                    panic!(
-                        "Invalid token at the end of document: '{}'",
-                        tokens[last_idx].slice
-                    );
+                    ParseError::new("Invalid token at the end of document", &tokens[last_idx], &tokens[(last_idx - 3)..])?;
                 }
-                parse_object(&tokens[1..last_idx])
+                parse_object(&tokens[1..last_idx])?
             }
             (JsonTokenType::String, 1) => JsonValue::String(&tok.slice[1..(tok.slice.len() - 1)]),
             (JsonTokenType::Number, 1) => JsonValue::Number(JsonNumber::parse(tok.slice)),
             (JsonTokenType::True, 1) => JsonValue::Boolean(true),
             (JsonTokenType::False, 1) => JsonValue::Boolean(false),
             (JsonTokenType::Null, 1) => JsonValue::Null,
-            _ => panic!("Invalid JSON token stream: ({:?}, {})", tok, tokens.len()),
+            _ => ParseError::new("Invalid JSON token stream", tok, tokens)?,
         },
         None => panic!("Empty JSON is invalid JSON"),
-    }
+    })
 }
 
-fn parse_array<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
+fn parse_array<'a, 'b>(tokens: &'a [JsonToken<'b>]) -> Result<JsonValue<'b>, ParseError<'a, 'b>> {
     let len = tokens.len();
     let mut array = Vec::new();
     let mut idx = 0;
@@ -315,7 +348,7 @@ fn parse_array<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
     loop {
         if idx == len {
             if idx > start {
-                array.push(parse_value(&tokens[start..idx]));
+                array.push(parse_value(&tokens[start..idx])?);
             }
             break;
         }
@@ -325,14 +358,14 @@ fn parse_array<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
             JsonTokenType::RightBracket => n_bracket -= 1,
             JsonTokenType::RightBrace => n_brace -= 1,
             JsonTokenType::Comma if n_bracket == 0 && n_brace == 0 => {
-                array.push(parse_value(&tokens[start..idx]));
-                start = idx;
+                array.push(parse_value(&tokens[start..idx])?);
+                start = idx + 1;
             }
             _ => {}
         }
         idx += 1;
     }
-    JsonValue::Array(array)
+    Ok(JsonValue::Array(array))
 }
 
 #[derive(PartialEq)]
@@ -341,7 +374,7 @@ enum ObjectParserState<'a> {
     Key(JsonToken<'a>),
     Column(JsonToken<'a>, usize),
 }
-fn parse_object<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
+fn parse_object<'a, 'b>(tokens: &'a [JsonToken<'b>]) -> Result<JsonValue<'b>, ParseError<'a, 'b>> {
     use ObjectParserState::*;
 
     let len = tokens.len();
@@ -356,9 +389,12 @@ fn parse_object<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
                 BeforeKey => {}
                 Column(ref key, start) if idx > start => {
                     let k = &key.slice[1..(key.slice.len() - 1)];
-                    obj.insert(k, parse_value(&tokens[start..idx]));
+                    obj.insert(k, parse_value(&tokens[start..idx])?);
                 }
-                _ => panic!("Incomplete object"),
+                Column(_, start) => {
+                    ParseError::new(format!("start({}) >= idx({})", start, idx), &tokens[idx - 1], tokens)?
+                },
+                Key(_) => ParseError::new("Incomplete object", &tokens[idx - 1], tokens)?,
             }
             break;
         }
@@ -366,16 +402,17 @@ fn parse_object<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
         match state {
             BeforeKey => {
                 if tok.token_type != JsonTokenType::String {
-                    panic!(
-                        "Unexpected token '{}' in place of string key in object",
-                        tok.slice
-                    );
+                    ParseError::new(
+                        "Unexpected token in place of string key in object",
+                        tok,
+                        &tokens[(idx - 1)..]
+                    )?;
                 }
                 state = Key(tok.clone());
             }
             Key(ref key) => {
                 if tok.token_type != JsonTokenType::Column {
-                    panic!("Expected ':' token, found '{}'", tok.slice);
+                    ParseError::new("Expected ':' token, found '{}'", tok, tokens)?;
                 }
                 state = Column(key.clone(), idx + 1);
             }
@@ -386,7 +423,7 @@ fn parse_object<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
                 JsonTokenType::RightBrace => n_brace -= 1,
                 JsonTokenType::Comma if n_bracket == 0 && n_brace == 0 => {
                     let k = &key.slice[1..(key.slice.len() - 1)];
-                    obj.insert(k, parse_value(&tokens[start..idx]));
+                    obj.insert(k, parse_value(&tokens[start..idx])?);
                     state = BeforeKey;
                 }
                 _ => {}
@@ -395,7 +432,7 @@ fn parse_object<'a>(tokens: &[JsonToken<'a>]) -> JsonValue<'a> {
 
         idx += 1;
     }
-    JsonValue::Object(obj)
+    Ok(JsonValue::Object(obj))
 }
 
 #[cfg(test)]
