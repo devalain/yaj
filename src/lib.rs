@@ -22,7 +22,7 @@ pub struct JsonToken<'a> {
     pub token_type: JsonTokenType,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum JsonNumber {
     Integer(i64),
     Float(f64),
@@ -38,7 +38,7 @@ impl JsonNumber {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum JsonValue<'a> {
     String(&'a str),
     Number(JsonNumber),
@@ -216,7 +216,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, Opt
         let (idx, chr) = match indices.next() {
             Some(tuple) => tuple,
             None if state == Sign => panic!("Unexpected end of file while lexing a number"),
-            None => break (start, None),
+            None => break (start + 1, None),
         };
         match state {
             Sign => match chr {
@@ -463,5 +463,11 @@ mod tests {
                 JsonTokenType::Comma
             ]
         );
+    }
+
+    #[test]
+    fn simple_values()  {
+        let five = parse("5");
+        assert_eq!(JsonValue::Number(JsonNumber::Integer(5)), five);
     }
 }
