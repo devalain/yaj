@@ -194,7 +194,7 @@ pub fn lex(source: &str) -> Vec<JsonToken> {
     tokens
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum NumberLexerState {
     Sign,
     FirstDigits,
@@ -212,12 +212,15 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, Opt
         '0' => FirstZero,
         _ => FirstDigits,
     };
+    let mut current = start;
     loop {
         let (idx, chr) = match indices.next() {
             Some(tuple) => tuple,
             None if state == Sign => panic!("Unexpected end of file while lexing a number"),
-            None => break (start + 1, None),
+            None => break (current + 1, None),
         };
+        current = idx;
+
         match state {
             Sign => match chr {
                 '0' => state = FirstZero,
@@ -228,7 +231,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, Opt
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {}
                 '.' => state = FractionDot,
                 'e' | 'E' => state = Exponent,
-                other => break (idx, Some(other)),
+                other => break (current, Some(other)),
             },
             FirstZero => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '-' => {
@@ -236,7 +239,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, Opt
                 }
                 '.' => state = FractionDot,
                 'e' | 'E' => state = Exponent,
-                other => break (idx, Some(other)),
+                other => break (current, Some(other)),
             },
             FractionDot => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {
@@ -250,7 +253,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, Opt
             FractionDigits => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {}
                 'e' | 'E' => state = Exponent,
-                other => break (idx, Some(other)),
+                other => break (current, Some(other)),
             },
             Exponent => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => state = ExponentDigits,
@@ -269,7 +272,7 @@ fn lex_number(start: usize, chr: char, indices: &mut CharIndices) -> (usize, Opt
             },
             ExponentDigits => match chr {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => {}
-                other => break (idx, Some(other)),
+                other => break (current, Some(other)),
             },
         }
     }
@@ -467,7 +470,10 @@ mod tests {
 
     #[test]
     fn simple_values()  {
-        let five = parse("5");
-        assert_eq!(JsonValue::Number(JsonNumber::Integer(5)), five);
+        assert_eq!(JsonValue::Number(JsonNumber::Integer(5)), parse("5"));
+        assert_eq!(JsonValue::Number(JsonNumber::Float(6.626E-34)), parse("6.626e-34"));
+        assert_eq!(JsonValue::Boolean(true), parse("true"));
+        assert_eq!(JsonValue::Null, parse("null"));
+        assert_eq!(JsonValue::String("Hello"), parse("\"Hello\""));
     }
 }
